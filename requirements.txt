@@ -1,0 +1,10 @@
+# Vanity Address Generator Requirements
+# Updated for security and compatibility
+
+# Core cryptographic libraries
+cryptography>=41.0.0
+pycryptodome>=3.19.0
+base58>=2.1.1
+
+# Optional dependencies for enhanced functionality
+# Note: tkinter is usually included with Python installations
