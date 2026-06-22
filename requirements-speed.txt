@@ -1,0 +1,2 @@
+# Optional secp256k1 acceleration
+coincurve>=20.0.0

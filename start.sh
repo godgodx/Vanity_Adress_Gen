@@ -42,7 +42,6 @@ check_dependencies() {
     "$PYTHON_BIN" -c "import cryptography" 2>/dev/null || missing_deps+=("cryptography")
     "$PYTHON_BIN" -c "import Crypto.Hash.keccak" 2>/dev/null || missing_deps+=("pycryptodome")
     "$PYTHON_BIN" -c "import base58" 2>/dev/null || missing_deps+=("base58")
-    "$PYTHON_BIN" -c "import coincurve" 2>/dev/null || missing_deps+=("coincurve")
     "$PYTHON_BIN" -c "import tkinter" 2>/dev/null || missing_deps+=("tkinter")
 
     if [ ${#missing_deps[@]} -eq 0 ]; then
@@ -124,6 +123,9 @@ main() {
     fi
 
     setup_environment
+    if ! "$PYTHON_BIN" -c "import coincurve" 2>/dev/null; then
+        echo -e "${YELLOW}INFO: coincurve is not installed. The app will use a slower compatible fallback.${NC}"
+    fi
     show_security_warning
 
     echo -e "${GREEN}START: Launching application...${NC}"

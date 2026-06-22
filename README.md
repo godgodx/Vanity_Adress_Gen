@@ -26,13 +26,18 @@ This project generates real private keys. Anyone with a generated private key ca
 - `cryptography`
 - `pycryptodome`
 - `base58`
-- `coincurve`
 - `tkinter` for the GUI, usually bundled with desktop Python installs.
 
 Install Python dependencies with:
 
 ```bash
 python -m pip install -r requirements.txt
+```
+
+Install optional secp256k1 acceleration with:
+
+```bash
+python -m pip install -r requirements-speed.txt
 ```
 
 Install optional GPU dependencies with:
@@ -156,6 +161,7 @@ vanity_generators.py   Bitcoin, Ethereum, and Tor key/address generators
 vanity_core.py         Pattern validation, matching, and difficulty helpers
 tests/                 Address and matching verification tests
 requirements.txt       Python dependencies
+requirements-speed.txt Optional secp256k1 acceleration dependency
 requirements-gpu.txt   Optional OpenCL GPU dependencies
 ```
 
