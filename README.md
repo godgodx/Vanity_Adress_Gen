@@ -1,253 +1,140 @@
-# 🎯 Vanity Address Generator
+# Vanity Address Generator
 
-A secure, multithreaded, offline vanity address generator for Bitcoin, Ethereum, and Tor (.onion) addresses with dark hacker-themed GUI.
-
-## 📸 Preview
+An offline CPU-based vanity address generator for Bitcoin, Ethereum, and Tor v3 onion addresses.
 
 ![Vanity Address Generator](screen/Screen1.png)
 
-*Dark hacker-themed interface with real-time pattern validation and multithreaded generation*
+## Features
 
-## ⚡ Features
+- Bitcoin mainnet P2PKH address generation.
+- Optional compressed Bitcoin public keys with matching WIF private keys.
+- Ethereum address generation with Keccak-256 and EIP-55 checksum casing.
+- Tor v3 onion address generation from Ed25519 keys.
+- Start, end, both, and anywhere pattern matching.
+- Worker-based generation with live speed, attempt, and result counters.
+- Per-run output files under `output/`.
 
-### 🔒 Multi-Cryptocurrency Support
-- **Bitcoin**: P2PKH addresses with uncompressed and compressed key support
-- **Ethereum**: Standard addresses with real Keccak-256 hashing
-- **Tor**: Version 3 .onion addresses with Ed25519 cryptography
+## Security Notice
 
-### 🎯 Advanced Pattern Matching
-- **Position-based search**: Start, End, Both, or Anywhere in address
-- **Case-sensitive Bitcoin**: Proper Base58 validation (excludes 0, O, I, l)
-- **Real-time validation**: Pattern validation with detailed error messages
-- **Dual patterns**: Start and end pattern matching for complex searches
+This project generates real private keys. Anyone with a generated private key can control the associated funds or service identity. Run the tool offline when possible, keep output files private, and test with small amounts before using any generated cryptocurrency address.
 
-### ⚙️ Technical Features
-- **Multithreaded generation**: Configurable worker threads for optimal performance
-- **Thread-safe counters**: Accurate statistics with proper synchronization
-- **CPU-only operation**: No GPU dependencies, runs anywhere
-- **Completely offline**: Zero network requirements for maximum security
-- **Cryptographically secure**: Uses industry-standard libraries and algorithms
+## Requirements
 
-### 🎨 User Interface
-- **Dark hacker theme**: Professional cyberpunk-style GUI
-- **Real-time progress**: Live updates with speed calculations
-- **Comprehensive statistics**: Thread performance and generation metrics
-- **Auto-save results**: Automatic file output with detailed metadata
+- Python 3.10 or newer.
+- `cryptography`
+- `pycryptodome`
+- `base58`
+- `tkinter` for the GUI, usually bundled with desktop Python installs.
 
-### 🔐 Security Features
-- **No dangerous fallbacks**: Removed insecure key generation methods
-- **Proper key validation**: Strict cryptographic validation for all currencies
-- **Private key security**: Secure WIF format with compression support
-- **Thread safety**: Race condition protection for accurate counting
+Install Python dependencies with:
 
-## 📦 Installation
-
-### Quick Setup
 ```bash
-python install.py
+python -m pip install -r requirements.txt
 ```
 
-### Manual Installation
+Linux users may need to install tkinter separately:
+
 ```bash
-pip install cryptography>=41.0.0 pycryptodome>=3.19.0 base58>=2.1.1
+sudo apt-get install python3-tk
 ```
 
-## 🚀 Usage
+## Running
 
-### 1. Launch Application
+Windows:
 
-#### Using Startup Scripts (Recommended)
+```cmd
+start.bat
+```
 
-**Linux/macOS:**
+Linux or macOS:
+
 ```bash
 chmod +x start.sh
 ./start.sh
 ```
 
-**Windows:**
-```cmd
-start.bat
-```
+Manual launch:
 
-The startup scripts will:
-- ✅ Check Python 3.7+ installation
-- ✅ Verify all dependencies 
-- ✅ Auto-install missing packages
-- ✅ Create output directory
-- ✅ Display security warnings
-- ✅ Launch the application safely
-
-#### Manual Launch
 ```bash
 python main.py
 ```
 
-### 2. Configure Generation
-- **Target**: Select Bitcoin, Ethereum, or Tor
-- **Bitcoin Options**: Enable compressed keys for modern wallet compatibility
-- **Pattern**: Enter desired text (validated in real-time)
-- **Position**: Choose where pattern should appear
-- **Parameters**: Set max results and thread count
+## Pattern Rules
 
-### 3. Advanced Options
-- **Compressed Bitcoin**: Generates K/L-prefix WIF keys and smaller addresses
-- **Dual patterns**: Use "Both" position for start+end pattern matching
-- **Thread optimization**: Use 1-4 threads per CPU core for best performance
+Patterns are matched against the searchable address body, not fixed protocol text:
 
-## 📁 Output Format
+- Bitcoin P2PKH addresses always start with `1`; search ignores that fixed leading prefix.
+- Ethereum addresses always start with `0x`; search ignores that fixed leading prefix.
+- Tor v3 onion addresses always end with `.onion`; search ignores that fixed suffix.
 
-Results saved to `output/` directory:
-```
-{crypto}_vanity_{pattern}_{timestamp}.txt
-```
+Allowed pattern characters:
 
-### File Contents
-```
-🎯 VANITY ADDRESS FOUND
-==================================================
-Cryptocurrency: Bitcoin (Compressed)
-Address: 1HackerXYZ7n8KvLK3b9y4RWdnWJjhqkKq
-Private Key: L1234567890abcdef... (WIF format)
-Pattern: Hacker
-Position: Start
-Thread ID: 2
-Thread Attempts: 15,847
-Total Attempts: 45,231
-Generation Time: 2024-09-02 14:30:15
-==================================================
+| Target | Alphabet |
+| --- | --- |
+| Bitcoin | Base58: `1-9`, `A-Z`, `a-z`, excluding `0`, `O`, `I`, `l` |
+| Ethereum | Hexadecimal: `0-9`, `a-f` |
+| Tor v3 onion | Base32: `a-z`, `2-7` |
+
+Bitcoin matching is case-sensitive. Ethereum and Tor matching are case-insensitive.
+
+## Output
+
+Each run writes matches to a timestamped file:
+
+```text
+output/{target}_vanity_{pattern}_{timestamp}.txt
 ```
 
-## 🔧 Technical Specifications
+Private key formats:
 
-### Cryptographic Libraries
-- **Bitcoin**: secp256k1 with uncompressed/compressed support
-- **Ethereum**: Real Keccak-256 (not SHA-3) via pycryptodome
-- **Tor**: Ed25519 with proper onion v3 generation
+| Target | Private key output |
+| --- | --- |
+| Bitcoin | WIF. Uncompressed keys start with `5`; compressed keys start with `K` or `L`. |
+| Ethereum | Hex private key with `0x` prefix. |
+| Tor v3 onion | PKCS#8 PEM Ed25519 private key. |
 
-### Address Formats
-- **Bitcoin**: P2PKH (1...) with Base58 encoding
-  - Uncompressed: 65-byte public key → WIF starting with "5"
-  - Compressed: 33-byte public key → WIF starting with "K" or "L"
-- **Ethereum**: 40-character hex addresses with 0x prefix
-- **Tor**: 56-character base32 addresses with .onion suffix
+## Verification
 
-### Pattern Validation
-- **Bitcoin**: Base58 alphabet (excludes 0, O, I, l) - case sensitive
-- **Ethereum**: Hexadecimal (0-9, a-f) - case insensitive
-- **Tor**: Base32 (a-z, 2-7) - case insensitive
+The test suite validates that generated addresses can be recomputed from the returned private keys:
 
-## ⚡ Performance Guide
-
-### Optimization Tips
-- **Thread count**: Use CPU core count × 2-4 for optimal throughput
-- **Pattern length**: Each additional character increases difficulty exponentially
-- **Position strategy**: "Start" is fastest, "Anywhere" is slowest
-- **Compression**: Compressed Bitcoin keys may generate faster
-
-### Difficulty Estimates
-| Pattern Length | Bitcoin (58^n) | Ethereum (16^n) | Tor (32^n) |
-|---------------|----------------|-----------------|------------|
-| 3 characters  | ~195K attempts | ~4K attempts   | ~33K attempts |
-| 4 characters  | ~11M attempts  | ~65K attempts  | ~1M attempts |
-| 5 characters  | ~660M attempts | ~1M attempts   | ~33M attempts |
-
-## 🛡️ Security Considerations
-
-### Private Key Safety
-- **NEVER share private keys** - they provide full control over funds
-- **Store securely** - use encrypted storage or hardware wallets
-- **Backup properly** - lose the key = lose the funds permanently
-- **Test with small amounts** before using for significant funds
-
-### Cryptographic Security
-- **True randomness**: Uses OS-provided cryptographically secure random sources
-- **Standard algorithms**: Implements official specifications for all currencies
-- **No shortcuts**: All keys are generated through proper cryptographic processes
-- **Validation**: Strict checks prevent invalid or weak key generation
-
-### Operational Security
-- **Offline generation**: Run on air-gapped systems for maximum security
-- **Clean environment**: Use dedicated systems for key generation
-- **Secure disposal**: Properly wipe memory and temporary files after use
-
-## 📋 Requirements
-
-### System Requirements
-- **Python**: 3.7+ (3.9+ recommended)
-- **OS**: Windows, Linux, macOS
-- **Memory**: 2GB+ RAM recommended for multithreading
-- **Storage**: Minimal disk space (results files only)
-
-### Dependencies
-```
-cryptography>=41.0.0    # secp256k1, Ed25519
-pycryptodome>=3.19.0    # Real Keccak-256
-base58>=2.1.1           # Bitcoin address encoding
-tkinter                 # GUI (usually included with Python)
-```
-
-## 🔍 Troubleshooting
-
-### Common Issues
-- **Pattern validation errors**: Check character restrictions for each currency
-- **Slow generation**: Reduce thread count or use shorter patterns
-- **Memory usage**: Lower thread count on systems with limited RAM
-- **GUI issues**: Ensure tkinter is properly installed
-
-### Linux-Specific Issues
-If tkinter is missing on Linux, install it with your package manager:
 ```bash
-# Ubuntu/Debian
-sudo apt-get install python3-tk
-
-# RHEL/CentOS
-sudo yum install tkinter
-
-# Arch Linux
-sudo pacman -S tk
+python -m unittest discover -s tests
 ```
 
-### Performance Issues
-- **High CPU usage**: Normal for CPU-intensive generation
-- **Thread conflicts**: Use recommended thread counts
-- **Pattern too long**: Exponential difficulty increase with length
+The tests cover:
 
-## ⚠️ Legal Disclaimer
+- Bitcoin Base58Check address and WIF consistency.
+- Bitcoin compressed and uncompressed public key modes.
+- Ethereum Keccak-256 address derivation and EIP-55 checksum casing.
+- Tor v3 onion checksum and Ed25519 public key derivation.
+- Pattern validation and matching rules.
 
-This software is provided for **educational and legitimate purposes only**:
+## Performance Notes
 
-- ✅ **Learning cryptography** and address generation
-- ✅ **Personal wallet creation** with custom addresses
-- ✅ **Testing and development** of blockchain applications
-- ❌ **Illegal activities** or attempts to compromise existing addresses
-- ❌ **Brute force attacks** on addresses you don't own
-- ❌ **Any malicious use** that violates local laws
+Vanity search is probabilistic. Each extra required character multiplies the expected work by the target alphabet size:
 
-### User Responsibilities
-- **Legal compliance**: Follow all applicable laws and regulations
-- **Security practices**: Implement proper key management and storage
-- **Financial risk**: Understand cryptocurrency risks and limitations
-- **Due diligence**: Test thoroughly before using for valuable transactions
+| Pattern length | Bitcoin | Ethereum | Tor v3 onion |
+| --- | ---: | ---: | ---: |
+| 3 | about 195,000 attempts | about 4,000 attempts | about 33,000 attempts |
+| 4 | about 11 million attempts | about 65,000 attempts | about 1 million attempts |
+| 5 | about 656 million attempts | about 1 million attempts | about 34 million attempts |
 
-### Liability Limitation
-The developers assume **no responsibility** for:
-- Loss of funds due to improper use
-- Security breaches or key compromises  
-- Legal issues arising from software use
-- Any damages direct or indirect from this software
+Use a worker count close to the CPU core count for the best balance of throughput and system responsiveness. Very long patterns can take hours, days, or longer.
 
-**Use at your own risk and discretion.**
+## Project Layout
 
----
+```text
+main.py                Tkinter GUI and worker orchestration
+vanity_generators.py   Bitcoin, Ethereum, and Tor key/address generators
+vanity_core.py         Pattern validation, matching, and difficulty helpers
+tests/                 Address and matching verification tests
+requirements.txt       Python dependencies
+```
 
-## 🤝 Contributing
+## Legal Disclaimer
 
-Feel free to contribute improvements, bug fixes, or additional features. Please ensure all cryptographic implementations follow security best practices.
+This software is provided for educational and legitimate personal use only. Do not use it to attack, impersonate, or compromise addresses, services, or identities that you do not own. You are responsible for complying with applicable laws and for protecting any generated private keys.
 
-## 📄 License
+## License
 
-This project is released under the MIT License. See LICENSE file for details.
-
----
-
-**Remember: Generated private keys control real cryptocurrency addresses. Handle with extreme care.**
+This project is released under the MIT License. See `LICENSE` for details.

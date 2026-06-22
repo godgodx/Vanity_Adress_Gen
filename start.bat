@@ -1,117 +1,97 @@
 @echo off
-REM Vanity Address Generator - Windows Startup Script
-REM Secure offline cryptocurrency address generator
-
 setlocal EnableDelayedExpansion
 
-REM ASCII Banner (Windows compatible)
+REM Vanity Address Generator - Windows startup script.
+
 echo.
-echo  ====================================================================
-echo  ^|  VANITY ADDRESS GENERATOR - OFFLINE CRYPTO ADDRESS GENERATOR  ^|
-echo  ====================================================================
-echo  ^|                                                                ^|
-echo  ^|  [*] Bitcoin    [*] Ethereum    [*] Tor (.onion)              ^|
-echo  ^|  [*] Secure     [*] Offline     [*] Multithreaded             ^|
-echo  ^|                                                                ^|
-echo  ====================================================================
+echo  ================================================================
+echo   VANITY ADDRESS GENERATOR - OFFLINE ADDRESS GENERATION
+echo  ================================================================
+echo   Targets: Bitcoin, Ethereum, Tor v3 onion
+echo  ================================================================
 echo.
 
-REM Change to script directory
 cd /d "%~dp0"
 
-echo [SYSTEM CHECK] Verifying environment...
-
-REM Check if Python is installed
-python --version >nul 2>&1
+echo [SYSTEM] Checking Python...
+python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
 if !errorlevel! neq 0 (
-    echo ERROR: Python not found. Please install Python 3.7 or newer.
+    echo ERROR: Python 3.10 or newer is required.
     echo Download from: https://python.org/downloads/
     pause
     exit /b 1
 )
 
-REM Check Python version
 for /f "tokens=2" %%i in ('python --version 2^>^&1') do set PYTHON_VERSION=%%i
-echo Found Python %PYTHON_VERSION%
+echo [OK] Python %PYTHON_VERSION% detected.
 
-REM Check if main.py exists
 if not exist "main.py" (
-    echo ERROR: main.py not found in current directory.
+    echo ERROR: main.py not found in the project directory.
     pause
     exit /b 1
 )
 
-REM Check dependencies
-echo [INFO] Checking dependencies...
+if not exist "vanity_generators.py" (
+    echo ERROR: vanity_generators.py not found in the project directory.
+    pause
+    exit /b 1
+)
+
+if not exist "vanity_core.py" (
+    echo ERROR: vanity_core.py not found in the project directory.
+    pause
+    exit /b 1
+)
+
+echo [SYSTEM] Checking dependencies...
 python -c "import cryptography, Crypto.Hash.keccak, base58, tkinter" >nul 2>&1
 if !errorlevel! neq 0 (
     echo WARNING: Some dependencies are missing.
-    echo.
-    set /p INSTALL="Install missing dependencies? (y/N): "
+    set /p INSTALL="Install missing Python dependencies? (y/N): "
     if /i "!INSTALL!"=="y" (
-        echo [INFO] Installing dependencies...
-        if exist "requirements.txt" (
-            pip install -r requirements.txt --user
-        ) else (
-            pip install cryptography^>=41.0.0 pycryptodome^>=3.19.0 base58^>=2.1.1 --user
-        )
-        
-        REM Check again
+        echo [SYSTEM] Installing dependencies...
+        python -m pip install --user -r requirements.txt
         python -c "import cryptography, Crypto.Hash.keccak, base58, tkinter" >nul 2>&1
         if !errorlevel! neq 0 (
-            echo ERROR: Failed to install dependencies.
+            echo ERROR: Dependency installation failed.
             pause
             exit /b 1
         )
     ) else (
-        echo Cannot proceed without dependencies.
+        echo Cannot continue without dependencies.
         pause
         exit /b 1
     )
 )
 
-echo [SUCCESS] All dependencies satisfied.
+echo [OK] Dependencies are available.
 
-REM Create output directory if it doesn't exist
 if not exist "output" (
     mkdir output
-    echo [INFO] Created output directory.
+    echo [OK] Created output directory.
 )
 
-REM Security warnings
 echo.
-echo  =====================================================
-echo  ^|              SECURITY WARNINGS                  ^|
-echo  =====================================================
-echo  ^| * This generates REAL private keys with access ^|
-echo  ^|   to funds                                      ^|
-echo  ^| * Keep private keys secure and never share them^|
-echo  ^| * Use on offline/air-gapped systems for        ^|
-echo  ^|   maximum security                              ^|
-echo  ^| * Test with small amounts before using for     ^|
-echo  ^|   large funds                                   ^|
-echo  ^| * You are responsible for key security and     ^|
-echo  ^|   fund safety                                   ^|
-echo  =====================================================
-echo.
-set /p AGREE="I understand the security implications (y/N): "
-if /i not "!AGREE!"=="y" (
-    echo Aborted by user.
+echo  SECURITY WARNING
+echo  ---------------------------------------------------------------
+echo   This application generates real private keys.
+echo   Anyone with a generated private key can control its funds.
+echo   Keep output files private, encrypted, and offline when possible.
+echo  ---------------------------------------------------------------
+set /p AGREE="Type YES to continue: "
+if not "!AGREE!"=="YES" (
+    echo Aborted.
     pause
     exit /b 1
 )
 
-REM Launch application
 echo.
-echo [STARTING] Launching Vanity Address Generator...
-echo [INFO] Close the window or press Ctrl+C to stop
-echo.
-
+echo [START] Launching application...
 python main.py
 
 if !errorlevel! neq 0 (
     echo.
-    echo ERROR: Application crashed or exited with error.
+    echo ERROR: Application exited with an error.
     pause
     exit /b 1
 )

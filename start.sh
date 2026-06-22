@@ -1,219 +1,133 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Vanity Address Generator - Linux Startup Script
-# Secure offline cryptocurrency address generator
+# Vanity Address Generator - Linux/macOS startup script.
 
-# Colors for output
+set -u
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-WHITE='\033[1;37m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# ASCII Banner
-echo -e "${GREEN}"
-echo "  ╦  ╦┌─┐┌┐┌┬┌┬┐┬ ┬  ╔═╗┌┬┐┌┬┐┬─┐┌─┐┌─┐┌─┐  ╔═╗┌─┐┌┐┌┌─┐┬─┐┌─┐┌┬┐┌─┐┬─┐"
-echo "  ╚╗╔╝├─┤││││ │ └┬┘  ╠═╣ ││ ││├┬┘├┤ └─┐└─┐  ║ ╦├┤ │││├┤ ├┬┘├─┤ │ │ │├┬┘"
-echo "   ╚╝ ┴ ┴┘└┘┴ ┴  ┴   ╩ ╩─┴┘─┴┘┴└─└─┘└─┘└─┘  ╚═╝└─┘┘└┘└─┘┴└─┴ ┴ ┴ └─┘┴└─"
-echo "                                                                           "
-echo -e "${CYAN}>> OFFLINE CRYPTO ADDRESS GENERATOR <<${NC}"
-echo ""
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
-# Function to check if command exists
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Function to check Python version
 check_python_version() {
-    if command_exists python3; then
-        local version=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
-        local major=$(echo $version | cut -d. -f1)
-        local minor=$(echo $version | cut -d. -f2)
-        
-        if [ "$major" -ge 3 ] && [ "$minor" -ge 7 ]; then
-            echo -e "${GREEN}✓ Python $version detected${NC}"
-            return 0
-        else
-            echo -e "${RED}✗ Python 3.7+ required, found $version${NC}"
-            return 1
-        fi
-    else
-        echo -e "${RED}✗ Python 3 not found${NC}"
+    if ! command_exists "$PYTHON_BIN"; then
+        echo -e "${RED}ERROR: $PYTHON_BIN not found. Install Python 3.10 or newer.${NC}"
         return 1
     fi
-}
 
-# Function to check dependencies
-check_dependencies() {
-    echo -e "${BLUE}[INFO]${NC} Checking dependencies..."
-    
-    # Check if requirements are installed
-    local missing_deps=()
-    
-    if ! python3 -c "import cryptography" 2>/dev/null; then
-        missing_deps+=("cryptography")
-    fi
-    
-    if ! python3 -c "import Crypto.Hash.keccak" 2>/dev/null; then
-        missing_deps+=("pycryptodome")
-    fi
-    
-    if ! python3 -c "import base58" 2>/dev/null; then
-        missing_deps+=("base58")
-    fi
-    
-    if ! python3 -c "import tkinter" 2>/dev/null; then
-        missing_deps+=("tkinter")
-    fi
-    
-    if [ ${#missing_deps[@]} -eq 0 ]; then
-        echo -e "${GREEN}✓ All dependencies satisfied${NC}"
+    if "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+        local version
+        version=$("$PYTHON_BIN" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')
+        echo -e "${GREEN}OK: Python $version detected.${NC}"
         return 0
-    else
-        echo -e "${YELLOW}⚠ Missing dependencies: ${missing_deps[*]}${NC}"
-        return 1
     fi
+
+    local version
+    version=$("$PYTHON_BIN" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')
+    echo -e "${RED}ERROR: Python 3.10 or newer is required. Found $version.${NC}"
+    return 1
 }
 
-# Function to install dependencies
+check_dependencies() {
+    echo -e "${BLUE}INFO: Checking dependencies...${NC}"
+    local missing_deps=()
+
+    "$PYTHON_BIN" -c "import cryptography" 2>/dev/null || missing_deps+=("cryptography")
+    "$PYTHON_BIN" -c "import Crypto.Hash.keccak" 2>/dev/null || missing_deps+=("pycryptodome")
+    "$PYTHON_BIN" -c "import base58" 2>/dev/null || missing_deps+=("base58")
+    "$PYTHON_BIN" -c "import tkinter" 2>/dev/null || missing_deps+=("tkinter")
+
+    if [ ${#missing_deps[@]} -eq 0 ]; then
+        echo -e "${GREEN}OK: All dependencies are available.${NC}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}WARNING: Missing dependencies: ${missing_deps[*]}${NC}"
+    return 1
+}
+
 install_dependencies() {
-    echo -e "${BLUE}[INFO]${NC} Installing dependencies..."
-    
-    # Check if pip is available
-    if ! command_exists pip3; then
-        echo -e "${RED}✗ pip3 not found. Please install pip first.${NC}"
+    echo -e "${BLUE}INFO: Installing Python dependencies...${NC}"
+
+    if "$PYTHON_BIN" -m pip --version >/dev/null 2>&1; then
+        "$PYTHON_BIN" -m pip install --user -r requirements.txt
+    elif command_exists pip3; then
+        pip3 install --user -r requirements.txt
+    else
+        echo -e "${RED}ERROR: pip is not available. Install pip and rerun this script.${NC}"
         exit 1
     fi
-    
-    # Install from requirements.txt if it exists
-    if [ -f "requirements.txt" ]; then
-        echo -e "${BLUE}[INFO]${NC} Installing from requirements.txt..."
-        pip3 install -r requirements.txt --user
-    else
-        echo -e "${BLUE}[INFO]${NC} Installing core dependencies manually..."
-        pip3 install cryptography>=41.0.0 pycryptodome>=3.19.0 base58>=2.1.1 --user
-    fi
-    
-    # Check for tkinter (often needs separate installation on Linux)
-    if ! python3 -c "import tkinter" 2>/dev/null; then
-        echo -e "${YELLOW}⚠ tkinter not available${NC}"
-        echo -e "${BLUE}[INFO]${NC} Install tkinter with your package manager:"
+
+    if ! "$PYTHON_BIN" -c "import tkinter" 2>/dev/null; then
+        echo -e "${YELLOW}WARNING: tkinter is not available.${NC}"
+        echo "Install tkinter with your package manager if the GUI does not open:"
         echo "  Ubuntu/Debian: sudo apt-get install python3-tk"
         echo "  RHEL/CentOS:   sudo yum install tkinter"
         echo "  Arch Linux:    sudo pacman -S tk"
-        echo ""
-        read -p "Continue anyway? (y/N): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
     fi
 }
 
-# Function to check file permissions
-check_permissions() {
-    if [ ! -f "main.py" ]; then
-        echo -e "${RED}✗ main.py not found in current directory${NC}"
+check_files() {
+    if [ ! -f "main.py" ] || [ ! -f "vanity_generators.py" ] || [ ! -f "vanity_core.py" ]; then
+        echo -e "${RED}ERROR: Application files are missing. Run this script from the project directory.${NC}"
         exit 1
     fi
-    
-    if [ ! -r "main.py" ]; then
-        echo -e "${RED}✗ Cannot read main.py${NC}"
-        exit 1
-    fi
-    
-    echo -e "${GREEN}✓ Application files accessible${NC}"
+    echo -e "${GREEN}OK: Application files found.${NC}"
 }
 
-# Function to create output directory
 setup_environment() {
-    if [ ! -d "output" ]; then
-        mkdir -p output
-        echo -e "${GREEN}✓ Created output directory${NC}"
-    fi
-    
-    # Set secure permissions for output directory
-    chmod 750 output 2>/dev/null
+    mkdir -p output
+    chmod 750 output 2>/dev/null || true
 }
 
-# Function to display security warnings
-show_security_warnings() {
-    echo -e "${YELLOW}"
-    echo "⚠️  SECURITY WARNINGS:"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "• This generates REAL private keys with access to funds"
-    echo "• Keep private keys secure and never share them"
-    echo "• Use on offline/air-gapped systems for maximum security"
-    echo "• Test with small amounts before using for large funds"
-    echo "• You are responsible for key security and fund safety"
-    echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    
-    read -p "I understand the security implications (y/N): " -n 1 -r
+show_security_warning() {
     echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo -e "${RED}Aborted by user${NC}"
+    echo "SECURITY WARNING"
+    echo "------------------------------------------------------------"
+    echo "This application generates real private keys."
+    echo "Anyone with a generated private key can control its funds."
+    echo "Keep output files private, encrypted, and offline when possible."
+    echo "------------------------------------------------------------"
+    read -r -p "Type YES to continue: " answer
+    if [ "$answer" != "YES" ]; then
+        echo "Aborted."
         exit 1
     fi
 }
 
-# Function to run the application
-run_application() {
-    echo -e "${GREEN}[STARTING]${NC} Launching Vanity Address Generator..."
-    echo -e "${BLUE}[INFO]${NC} Press Ctrl+C to stop"
-    echo ""
-    
-    # Run with proper error handling
-    if ! python3 main.py; then
-        echo -e "${RED}✗ Application crashed or exited with error${NC}"
-        exit 1
-    fi
-}
-
-# Main execution flow
 main() {
-    # Change to script directory
     cd "$(dirname "$0")"
-    
-    echo -e "${BLUE}[SYSTEM CHECK]${NC} Verifying environment..."
-    
-    # System checks
-    if ! check_python_version; then
-        echo -e "${RED}Please install Python 3.7 or newer${NC}"
-        exit 1
-    fi
-    
-    check_permissions
-    
-    # Dependency checks
+    echo "Vanity Address Generator"
+    echo "Offline Bitcoin, Ethereum, and Tor address generation"
+    echo
+
+    check_python_version || exit 1
+    check_files
+
     if ! check_dependencies; then
-        echo ""
-        read -p "Install missing dependencies? (y/N): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
+        read -r -p "Install missing Python dependencies? (y/N): " answer
+        if [[ "$answer" =~ ^[Yy]$ ]]; then
             install_dependencies
-            echo ""
-            if ! check_dependencies; then
-                echo -e "${RED}✗ Failed to install dependencies${NC}"
-                exit 1
-            fi
+            check_dependencies || exit 1
         else
-            echo -e "${RED}Cannot proceed without dependencies${NC}"
+            echo "Cannot continue without dependencies."
             exit 1
         fi
     fi
-    
+
     setup_environment
-    show_security_warnings
-    run_application
+    show_security_warning
+
+    echo -e "${GREEN}START: Launching application...${NC}"
+    "$PYTHON_BIN" main.py
 }
 
-# Handle Ctrl+C gracefully
-trap 'echo -e "\n${YELLOW}[INTERRUPTED]${NC} Application stopped by user"; exit 130' INT
-
-# Run main function
+trap 'echo; echo "Interrupted."; exit 130' INT
 main "$@"

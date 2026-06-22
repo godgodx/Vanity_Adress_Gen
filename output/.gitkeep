@@ -1,13 +1,4 @@
-# This file ensures the output directory is tracked by Git
-# 
-# The output/ directory will contain generated vanity address results:
-# - Bitcoin addresses with private keys (WIF format)
-# - Ethereum addresses with private keys (hex format)  
-# - Tor .onion addresses with private keys (PEM format)
+# This file keeps the output directory in version control.
 #
-# Files are automatically created with naming convention:
-# {cryptocurrency}_vanity_{pattern}_{timestamp}.txt
-#
-# ⚠️  SECURITY WARNING:
-# Generated files contain REAL private keys with access to funds.
-# Keep this directory secure and never share private keys!
+# Generated result files are written here at runtime and can contain real
+# private keys. Keep generated files secure and do not commit them.
