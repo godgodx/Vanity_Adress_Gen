@@ -10,29 +10,50 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BIN="${PYTHON_BIN:-}"
+CHECK_ONLY=0
+
+if [ "${1:-}" = "--check" ]; then
+    CHECK_ONLY=1
+fi
 
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-check_python_version() {
-    if ! command_exists "$PYTHON_BIN"; then
-        echo -e "${RED}ERROR: $PYTHON_BIN not found. Install Python 3.10 or newer.${NC}"
+python_is_supported() {
+    local candidate="$1"
+    command_exists "$candidate" || return 1
+    "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
+}
+
+select_python() {
+    if [ -n "$PYTHON_BIN" ]; then
+        if python_is_supported "$PYTHON_BIN"; then
+            return 0
+        fi
+        echo -e "${RED}ERROR: PYTHON_BIN=$PYTHON_BIN is not Python 3.10 or newer.${NC}"
         return 1
     fi
 
-    if "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
-        local version
-        version=$("$PYTHON_BIN" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')
-        echo -e "${GREEN}OK: Python $version detected.${NC}"
-        return 0
-    fi
+    for candidate in python3 python; do
+        if python_is_supported "$candidate"; then
+            PYTHON_BIN="$candidate"
+            return 0
+        fi
+    done
+
+    echo -e "${RED}ERROR: Python 3.10 or newer is required.${NC}"
+    return 1
+}
+
+check_python_version() {
+    select_python || return 1
 
     local version
     version=$("$PYTHON_BIN" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')
-    echo -e "${RED}ERROR: Python 3.10 or newer is required. Found $version.${NC}"
-    return 1
+    echo -e "${GREEN}OK: Python $version detected via $PYTHON_BIN.${NC}"
+    return 0
 }
 
 check_dependencies() {
@@ -83,8 +104,17 @@ check_files() {
 }
 
 setup_environment() {
-    mkdir -p output
-    chmod 750 output 2>/dev/null || true
+    "$PYTHON_BIN" - <<'PY'
+import os
+from pathlib import Path
+
+output_dir = Path("output")
+output_dir.mkdir(exist_ok=True)
+try:
+    os.chmod(output_dir, 0o750)
+except OSError:
+    pass
+PY
 }
 
 show_security_warning() {
@@ -95,15 +125,26 @@ show_security_warning() {
     echo "Anyone with a generated private key can control its funds."
     echo "Keep output files private, encrypted, and offline when possible."
     echo "------------------------------------------------------------"
-    read -r -p "Type YES to continue: " answer
-    if [ "$answer" != "YES" ]; then
-        echo "Aborted."
-        exit 1
-    fi
+    read -r -p "Continue? (y/N): " answer
+    case "$answer" in
+        y|Y|yes|YES|Yes) ;;
+        *)
+            echo "Aborted."
+            exit 1
+            ;;
+    esac
 }
 
 main() {
-    cd "$(dirname "$0")"
+    local script_path
+    local script_dir
+    script_path="${BASH_SOURCE[0]:-$0}"
+    script_dir="${script_path%/*}"
+    if [ "$script_dir" = "$script_path" ]; then
+        script_dir="."
+    fi
+    cd "$script_dir" || exit 1
+
     echo "Vanity Address Generator"
     echo "Offline Bitcoin, Ethereum, and Tor address generation"
     echo
@@ -126,6 +167,12 @@ main() {
     if ! "$PYTHON_BIN" -c "import coincurve" 2>/dev/null; then
         echo -e "${YELLOW}INFO: coincurve is not installed. The app will use a slower compatible fallback.${NC}"
     fi
+
+    if [ "$CHECK_ONLY" -eq 1 ]; then
+        echo -e "${GREEN}OK: Startup checks passed.${NC}"
+        exit 0
+    fi
+
     show_security_warning
 
     echo -e "${GREEN}START: Launching application...${NC}"
