@@ -20,6 +20,11 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
+try:
+    from coincurve import PrivateKey as CoincurvePrivateKey
+except Exception:  # pragma: no cover - optional performance dependency.
+    CoincurvePrivateKey = None
+
 
 SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 BITCOIN_MAINNET_P2PKH_VERSION = b"\x00"
@@ -53,6 +58,15 @@ def keccak256(data: bytes) -> bytes:
     return digest.digest()
 
 
+def _secp256k1_public_key(private_value: int, private_key_bytes: bytes, compressed: bool) -> bytes:
+    if CoincurvePrivateKey is not None:
+        return CoincurvePrivateKey(private_key_bytes).public_key.format(compressed=compressed)
+
+    private_key = ec.derive_private_key(private_value, ec.SECP256K1())
+    public_format = PublicFormat.CompressedPoint if compressed else PublicFormat.UncompressedPoint
+    return private_key.public_key().public_bytes(Encoding.X962, public_format)
+
+
 class BitcoinGenerator:
     """
     Generate Bitcoin mainnet P2PKH addresses.
@@ -64,10 +78,7 @@ class BitcoinGenerator:
     def generate_address(self, compressed: bool = False) -> Tuple[str, str]:
         private_value = _random_secp256k1_private_value()
         private_key_bytes = private_value.to_bytes(32, "big")
-        private_key = ec.derive_private_key(private_value, ec.SECP256K1())
-
-        public_format = PublicFormat.CompressedPoint if compressed else PublicFormat.UncompressedPoint
-        public_key_bytes = private_key.public_key().public_bytes(Encoding.X962, public_format)
+        public_key_bytes = _secp256k1_public_key(private_value, private_key_bytes, compressed)
 
         address_payload = BITCOIN_MAINNET_P2PKH_VERSION + _hash160(public_key_bytes)
         address = _base58check_encode(address_payload)
@@ -102,12 +113,7 @@ class EthereumGenerator:
     def generate_address(self) -> Tuple[str, str]:
         private_value = _random_secp256k1_private_value()
         private_key_bytes = private_value.to_bytes(32, "big")
-        private_key = ec.derive_private_key(private_value, ec.SECP256K1())
-
-        public_key_bytes = private_key.public_key().public_bytes(
-            Encoding.X962,
-            PublicFormat.UncompressedPoint,
-        )[1:]
+        public_key_bytes = _secp256k1_public_key(private_value, private_key_bytes, compressed=False)[1:]
         address_hex = keccak256(public_key_bytes)[-20:].hex()
         private_key_hex = "0x" + private_key_bytes.hex()
         return self.checksum_address(address_hex), private_key_hex

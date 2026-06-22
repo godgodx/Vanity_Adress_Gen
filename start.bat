@@ -44,14 +44,14 @@ if not exist "vanity_core.py" (
 )
 
 echo [SYSTEM] Checking dependencies...
-python -c "import cryptography, Crypto.Hash.keccak, base58, tkinter" >nul 2>&1
+python -c "import cryptography, Crypto.Hash.keccak, base58, coincurve, tkinter" >nul 2>&1
 if !errorlevel! neq 0 (
     echo WARNING: Some dependencies are missing.
     set /p INSTALL="Install missing Python dependencies? (y/N): "
     if /i "!INSTALL!"=="y" (
         echo [SYSTEM] Installing dependencies...
         python -m pip install --user -r requirements.txt
-        python -c "import cryptography, Crypto.Hash.keccak, base58, tkinter" >nul 2>&1
+        python -c "import cryptography, Crypto.Hash.keccak, base58, coincurve, tkinter" >nul 2>&1
         if !errorlevel! neq 0 (
             echo ERROR: Dependency installation failed.
             pause
