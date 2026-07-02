@@ -24,11 +24,20 @@ from vanity_generators import BitcoinGenerator, EthereumGenerator, TorGenerator
 MAX_WORKERS = 64
 STATS_BATCH_SIZE = 256
 GPU_BATCH_SIZE = 4096
+BENCHMARK_SECONDS = 2.0
+GPU_BENCHMARK_BATCH_SIZE = 1024
 BASE_SPEED_BY_TARGET = {
     "bitcoin": 12000,
     "ethereum": 12000,
     "tor": 10000,
 }
+GPU_SPEED_MULTIPLIER_BY_TARGET = {
+    "bitcoin": 1.35,
+    "ethereum": 1.35,
+    "tor": 1.25,
+}
+GPU_REFERENCE_COMPUTE_UNITS = 16
+GPU_COMPUTE_UNIT_SCALE_LIMIT = 1.75
 GENERATOR_TYPES: dict[str, Type[BitcoinGenerator] | Type[EthereumGenerator] | Type[TorGenerator]] = {
     "bitcoin": BitcoinGenerator,
     "ethereum": EthereumGenerator,
@@ -58,10 +67,14 @@ class VanityAddressGUI:
         self.root.minsize(700, 620)
 
         self.is_generating = False
+        self.is_calibrating = False
         self.stop_event = threading.Event()
+        self.calibration_stop_event = threading.Event()
         self.result_queue: queue.Queue[dict] = queue.Queue()
         self.generator_threads: list[threading.Thread] = []
+        self.calibration_thread: threading.Thread | None = None
         self.current_config: GenerationConfig | None = None
+        self.measured_speed_cache: dict[tuple[str, str, str, str, str, int, bool, str], float] = {}
         self.gpu_devices = list_gpu_devices()
         self.gpu_device_labels = {device.label: device.key for device in self.gpu_devices}
         self.gpu_matcher: GPUAddressMatcher | None = None
@@ -205,6 +218,7 @@ class VanityAddressGUI:
             width=44,
         )
         self.gpu_device_combo.grid(row=0, column=3, sticky=(tk.W, tk.E))
+        self.gpu_device_combo.bind("<<ComboboxSelected>>", self.on_gpu_device_change)
         if not labels:
             self.gpu_radio.state(["disabled"])
 
@@ -213,6 +227,8 @@ class VanityAddressGUI:
         self.count_var = tk.StringVar(value="5")
         default_workers = min(MAX_WORKERS, max(1, multiprocessing.cpu_count()))
         self.threads_var = tk.StringVar(value=str(default_workers))
+        self.count_var.trace_add("write", self.on_estimate_input_change)
+        self.threads_var.trace_add("write", self.on_estimate_input_change)
         ttk.Label(settings, text="MAX RESULTS:", style="Heading.TLabel").grid(row=0, column=0, sticky=tk.W)
         ttk.Entry(settings, textvariable=self.count_var, width=7).grid(row=0, column=1, padx=(6, 18))
         ttk.Label(settings, text="WORKERS:", style="Heading.TLabel").grid(row=0, column=2, sticky=tk.W)
@@ -310,6 +326,14 @@ class VanityAddressGUI:
         if not self.is_generating:
             self.refresh_idle_estimate()
 
+    def on_gpu_device_change(self, _event: object | None = None) -> None:
+        if not self.is_generating:
+            self.refresh_idle_estimate()
+
+    def on_estimate_input_change(self, *_args: object) -> None:
+        if not self.is_generating:
+            self.refresh_idle_estimate()
+
     def on_pattern_change(self, *_args: object) -> None:
         crypto = self.crypto_var.get()
         pattern = self.pattern_var.get()
@@ -402,33 +426,192 @@ class VanityAddressGUI:
         )
 
     def start_generation(self) -> None:
-        if self.is_generating:
+        if self.is_generating or self.is_calibrating:
             return
 
         config = self.validate_inputs()
         if config is None:
             return
 
+        self.start_calibration(config)
+
+    def start_calibration(self, config: GenerationConfig) -> None:
+        self.is_calibrating = True
+        self.calibration_stop_event.clear()
+        self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
+        self.status_var.set("CALIBRATING")
+        self.progress_bar.start(12)
+        self.speed_var.set("Measuring...")
+        self.time_est_var.set("Calibrating...")
+        self.append_result(
+            f"\n[BENCH] Measuring real {config.compute_mode.upper()} speed for {config.thread_count} worker"
+            f"{'s' if config.thread_count != 1 else ''}. This can take a few seconds.\n"
+        )
+
+        self.calibration_thread = threading.Thread(
+            target=self.calibration_worker,
+            args=(config,),
+            daemon=True,
+        )
+        self.calibration_thread.start()
+
+    def calibration_worker(self, config: GenerationConfig) -> None:
+        gpu_matcher: GPUAddressMatcher | None = None
+        try:
+            if config.compute_mode == "gpu":
+                gpu_matcher = GPUAddressMatcher(config.gpu_device_key)
+
+            speed = self.measure_generation_speed(config, gpu_matcher)
+            self.result_queue.put(
+                {
+                    "calibration": True,
+                    "config": config,
+                    "speed": speed,
+                    "gpu_matcher": gpu_matcher,
+                }
+            )
+        except Exception as exc:
+            self.result_queue.put({"calibration_error": f"Calibration failed: {exc}"})
+
+    def measure_generation_speed(
+        self,
+        config: GenerationConfig,
+        gpu_matcher: GPUAddressMatcher | None,
+    ) -> float:
+        generator_type = GENERATOR_TYPES[config.crypto]
+        worker_count = max(1, config.thread_count)
+        counts = [0 for _ in range(worker_count)]
+        errors: list[Exception] = []
+        gpu_lock = threading.Lock()
+
+        def generate_address(generator: BitcoinGenerator | EthereumGenerator | TorGenerator) -> str:
+            if config.crypto == "bitcoin":
+                address, _private_key = generator.generate_address(config.compressed)  # type: ignore[attr-defined]
+            else:
+                address, _private_key = generator.generate_address()  # type: ignore[call-arg]
+            return address
+
+        def benchmark_cpu(worker_index: int) -> None:
+            generator = generator_type()
+            local_count = 0
+            try:
+                while not self.calibration_stop_event.is_set():
+                    address = generate_address(generator)
+                    matches_pattern(address, config.pattern, config.crypto, config.position, config.end_pattern)
+                    local_count += 1
+            except Exception as exc:
+                errors.append(exc)
+                self.calibration_stop_event.set()
+            finally:
+                counts[worker_index] = local_count
+
+        def benchmark_gpu(worker_index: int) -> None:
+            if gpu_matcher is None:
+                raise RuntimeError("GPU matcher is not initialized.")
+
+            generator = generator_type()
+            local_count = 0
+            batch_addresses: list[str] = []
+            try:
+                while not self.calibration_stop_event.is_set():
+                    batch_addresses.append(generate_address(generator))
+                    if len(batch_addresses) >= GPU_BENCHMARK_BATCH_SIZE:
+                        with gpu_lock:
+                            gpu_matcher.match_addresses(
+                                batch_addresses,
+                                config.pattern,
+                                config.crypto,
+                                config.position,
+                                config.end_pattern,
+                            )
+                        local_count += len(batch_addresses)
+                        batch_addresses = []
+            except Exception as exc:
+                errors.append(exc)
+                self.calibration_stop_event.set()
+            finally:
+                if batch_addresses and gpu_matcher is not None:
+                    with gpu_lock:
+                        gpu_matcher.match_addresses(
+                            batch_addresses,
+                            config.pattern,
+                            config.crypto,
+                            config.position,
+                            config.end_pattern,
+                        )
+                    local_count += len(batch_addresses)
+                counts[worker_index] = local_count
+
+        target = benchmark_gpu if config.compute_mode == "gpu" else benchmark_cpu
+        started_at = time.perf_counter()
+        threads = [
+            threading.Thread(target=target, args=(worker_index,), daemon=True)
+            for worker_index in range(worker_count)
+        ]
+        for thread in threads:
+            thread.start()
+
+        while time.perf_counter() - started_at < BENCHMARK_SECONDS and not self.calibration_stop_event.is_set():
+            time.sleep(0.05)
+
+        self.calibration_stop_event.set()
+        for thread in threads:
+            thread.join(timeout=5.0)
+
+        elapsed = max(0.001, time.perf_counter() - started_at)
+        if errors:
+            raise RuntimeError(errors[0])
+        return sum(counts) / elapsed
+
+    def finish_calibration(
+        self,
+        config: GenerationConfig,
+        speed: float,
+        gpu_matcher: GPUAddressMatcher | None,
+    ) -> None:
+        if not self.is_calibrating:
+            return
+
+        self.is_calibrating = False
+        self.calibration_thread = None
+        self.measured_speed_cache[self.speed_cache_key(config)] = speed
+        self.gpu_matcher = gpu_matcher if config.compute_mode == "gpu" else None
+
+        measured_speed = max(1.0, speed)
+        difficulty = estimate_difficulty(config.pattern, config.position, config.crypto, config.end_pattern)
+        expected = self.format_time_estimate_from_seconds(
+            ((difficulty / 2) * max(1, config.target_count)) / measured_speed
+        )
+        self.speed_var.set(f"{int(measured_speed):,} addr/sec")
+        self.time_est_var.set(expected)
+        self.append_result(
+            f"[BENCH] Measured {int(measured_speed):,} addr/sec on this hardware. Estimated time: {expected}.\n"
+        )
+
         difficulty = estimate_difficulty(config.pattern, config.position, config.crypto, config.end_pattern)
         if difficulty > 1_000_000:
-            expected = self.format_time_estimate(difficulty, config.target_count)
             answer = messagebox.askyesno(
                 "Difficult Pattern Warning",
                 f"This pattern can take a long time.\n\nEstimated time: {expected}\nEstimated average attempts: {int((difficulty / 2) * config.target_count):,}\n\nContinue?",
             )
             if not answer:
+                self.reset_to_ready()
                 return
 
-        if config.compute_mode == "gpu":
-            try:
-                self.gpu_matcher = GPUAddressMatcher(config.gpu_device_key)
-            except Exception as exc:
-                messagebox.showerror("GPU Initialization Failed", str(exc))
-                self.gpu_matcher = None
-                return
-        else:
-            self.gpu_matcher = None
+        self.launch_generation(config)
 
+    def fail_calibration(self, error: str) -> None:
+        if not self.is_calibrating:
+            return
+        self.is_calibrating = False
+        self.calibration_thread = None
+        self.gpu_matcher = None
+        self.append_result(f"[ERROR] {error}\n")
+        self.reset_to_ready()
+        messagebox.showerror("Calibration Failed", error)
+
+    def launch_generation(self, config: GenerationConfig) -> None:
         self.current_config = config
         self.is_generating = True
         self.completion_notice_shown = False
@@ -625,7 +808,11 @@ class VanityAddressGUI:
         try:
             while True:
                 result = self.result_queue.get_nowait()
-                if "error" in result:
+                if "calibration" in result:
+                    self.finish_calibration(result["config"], result["speed"], result["gpu_matcher"])
+                elif "calibration_error" in result:
+                    self.fail_calibration(result["calibration_error"])
+                elif "error" in result:
                     self.append_result(f"[ERROR] {result['error']}\n")
                     self.finish_generation("ERROR", show_dialog=False)
                 else:
@@ -692,7 +879,29 @@ class VanityAddressGUI:
             file.write("=" * 50 + "\n\n")
 
     def stop_generation(self) -> None:
+        if self.is_calibrating:
+            self.cancel_calibration()
+            return
         self.finish_generation("STOPPED", show_dialog=False)
+
+    def cancel_calibration(self) -> None:
+        if not self.is_calibrating:
+            return
+        self.calibration_stop_event.set()
+        self.is_calibrating = False
+        self.calibration_thread = None
+        self.gpu_matcher = None
+        self.append_result("[BENCH] Calibration canceled.\n")
+        self.reset_to_ready()
+
+    def reset_to_ready(self) -> None:
+        self.start_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.DISABLED)
+        self.status_var.set("READY")
+        self.progress_bar.stop()
+        self.speed_var.set("0 addr/sec")
+        self.attempts_var.set("0")
+        self.refresh_idle_estimate()
 
     def finish_generation(self, state: str, show_dialog: bool) -> None:
         if not self.is_generating:
@@ -791,14 +1000,93 @@ class VanityAddressGUI:
         cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
         return cleaned.strip("._") or "pattern"
 
-    def format_time_estimate(self, difficulty: float, target_count: int = 1) -> str:
+    def format_time_estimate(
+        self,
+        difficulty: float,
+        target_count: int = 1,
+        *,
+        crypto: str | None = None,
+        thread_count: int | None = None,
+        compute_mode: str | None = None,
+        gpu_device_key: str | None = None,
+    ) -> str:
         if difficulty == float("inf"):
             return "Unknown"
-        threads = int(self.threads_var.get()) if self.threads_var.get().isdigit() else 1
-        crypto = self.crypto_var.get()
-        total_speed = max(1, BASE_SPEED_BY_TARGET[crypto] * threads)
+        crypto = crypto or self.crypto_var.get()
+        threads = thread_count if thread_count is not None else self.current_thread_count_for_estimate()
+        compute_mode = compute_mode or self.compute_var.get()
+        gpu_device_key = gpu_device_key if gpu_device_key is not None else self.selected_gpu_device_key()
+        total_speed = self.cached_measured_speed(crypto, threads, compute_mode, gpu_device_key)
+        if total_speed is None:
+            total_speed = self.estimated_total_speed(crypto, threads, compute_mode, gpu_device_key)
         average_seconds = ((difficulty / 2) * max(1, target_count)) / total_speed
         return self.format_time_estimate_from_seconds(average_seconds)
+
+    def current_thread_count_for_estimate(self) -> int:
+        try:
+            return max(1, min(MAX_WORKERS, int(self.threads_var.get())))
+        except ValueError:
+            return 1
+
+    def selected_gpu_device_key(self) -> str:
+        return self.gpu_device_labels.get(self.gpu_device_var.get(), "")
+
+    @staticmethod
+    def speed_cache_key(config: GenerationConfig) -> tuple[str, str, str, str, str, int, bool, str]:
+        gpu_key = config.gpu_device_key if config.compute_mode == "gpu" else ""
+        return (
+            config.crypto,
+            config.pattern,
+            config.end_pattern,
+            config.position,
+            config.compute_mode,
+            config.thread_count,
+            config.compressed,
+            gpu_key,
+        )
+
+    def cached_measured_speed(
+        self,
+        crypto: str,
+        thread_count: int,
+        compute_mode: str,
+        gpu_device_key: str,
+    ) -> float | None:
+        position = self.position_var.get()
+        pattern = self.pattern_var.get().strip()
+        end_pattern = self.end_pattern_var.get().strip() if position == "both" else ""
+        compressed = self.compressed_var.get() if crypto == "bitcoin" else False
+        gpu_key = gpu_device_key if compute_mode == "gpu" else ""
+        return self.measured_speed_cache.get(
+            (
+                crypto,
+                pattern,
+                end_pattern,
+                position,
+                compute_mode,
+                thread_count,
+                compressed,
+                gpu_key,
+            )
+        )
+
+    def estimated_total_speed(
+        self,
+        crypto: str,
+        thread_count: int,
+        compute_mode: str,
+        gpu_device_key: str = "",
+    ) -> int:
+        threads = max(1, min(MAX_WORKERS, thread_count))
+        cpu_speed = BASE_SPEED_BY_TARGET[crypto] * threads
+        if compute_mode != "gpu":
+            return max(1, int(cpu_speed))
+
+        device = next((candidate for candidate in self.gpu_devices if candidate.key == gpu_device_key), None)
+        compute_units = device.compute_units if device else GPU_REFERENCE_COMPUTE_UNITS
+        device_scale = min(GPU_COMPUTE_UNIT_SCALE_LIMIT, max(1.0, compute_units / GPU_REFERENCE_COMPUTE_UNITS))
+        multiplier = GPU_SPEED_MULTIPLIER_BY_TARGET[crypto] * device_scale
+        return max(1, int(cpu_speed * multiplier))
 
     @staticmethod
     def format_time_estimate_from_seconds(seconds: float) -> str:
