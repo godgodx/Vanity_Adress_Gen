@@ -138,17 +138,29 @@ The tests cover:
 - Ethereum Keccak-256 address derivation and EIP-55 checksum casing.
 - Tor v3 onion checksum and Ed25519 public key derivation.
 - Pattern validation and matching rules.
+- Difficulty estimation accuracy for all targets and positions, including the non-uniform Bitcoin leading-character distribution.
 - OpenCL GPU matcher parity with CPU matching rules when a GPU is available.
 
 ## Performance Notes
 
-Vanity search is probabilistic. Each extra required character multiplies the expected work by the target alphabet size:
+Vanity search is probabilistic. Except when matching the first character of a Bitcoin address body, every extra required character multiplies the expected work by the target alphabet size:
 
-| Pattern length | Bitcoin | Ethereum | Tor v3 onion |
+| Pattern length | Ethereum | Tor v3 onion | Bitcoin (end position) |
 | --- | ---: | ---: | ---: |
-| 3 | about 195,000 attempts | about 4,000 attempts | about 33,000 attempts |
-| 4 | about 11 million attempts | about 65,000 attempts | about 1 million attempts |
-| 5 | about 656 million attempts | about 1 million attempts | about 34 million attempts |
+| 3 | about 4,000 attempts | about 33,000 attempts | about 195,000 attempts |
+| 4 | about 65,000 attempts | about 1 million attempts | about 11 million attempts |
+| 5 | about 1 million attempts | about 34 million attempts | about 656 million attempts |
+
+Bitcoin start patterns are special: the first searchable character of a P2PKH address body is **not** uniformly distributed over Base58. Expected attempts per match for a 3-character start pattern:
+
+| First pattern character | Expected attempts |
+| --- | ---: |
+| `2`-`9`, `A`-`N`, `P` | about 78,000 |
+| `Q` | about 223,000 |
+| `1` | about 868,000 |
+| `R`-`Z`, `a`-`z` | about 4.6 million |
+
+The same factors apply proportionally to longer start patterns and to the start side of "both" searches. The GUI accounts for this distribution, calibrates real generation throughput on your hardware for a few seconds before each search, and reports average time estimates from both.
 
 Use a worker count close to the CPU core count for the best balance of throughput and system responsiveness. GPU mode processes candidates in batches of 4,096 addresses per worker. Very long patterns can take hours, days, or longer.
 
