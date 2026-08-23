@@ -96,6 +96,10 @@ POSITION_CODES = {
     "anywhere": 3,
 }
 
+# Minimum candidate capacity for reusable GPU buffers, matching the runtime
+# batch size used by the GUI workers.
+GPU_MIN_BUFFER_CAPACITY = 4096
+
 
 @dataclass(frozen=True)
 class GpuDevice:
@@ -168,6 +172,18 @@ class GPUAddressMatcher:
         self.program = self.cl.Program(self.context, GPU_MATCH_KERNEL).build()
         self.kernel = self.cl.Kernel(self.program, "match_address_bodies")
 
+        # Reusable host/device buffers so repeated batch calls do not pay the
+        # allocation and buffer-creation cost every time.
+        self._capacity = 0
+        self._width = 0
+        self._host_bodies = None
+        self._host_lengths = None
+        self._host_matches = None
+        self._body_buffer = None
+        self._length_buffer = None
+        self._match_buffer = None
+        self._pattern_buffer_cache: dict[bytes, object] = {}
+
     @property
     def device_label(self) -> str:
         return f"{self.device.name.strip()} ({self.device.vendor.strip()})"
@@ -186,6 +202,43 @@ class GPUAddressMatcher:
                 return devices[0]
         raise RuntimeError("No OpenCL GPU device was found.")
 
+    def _ensure_buffers(self, count: int, width: int) -> None:
+        """Grow reusable host and device buffers when a larger batch arrives."""
+        if count <= self._capacity and width <= self._width:
+            return
+
+        capacity = max(count, 2 * self._capacity, GPU_MIN_BUFFER_CAPACITY)
+        width = max(width, self._width)
+        np = self.np
+        flags = self.cl.mem_flags
+
+        self._host_bodies = np.zeros((capacity, width), dtype=np.uint8)
+        self._host_lengths = np.zeros(capacity, dtype=np.int32)
+        self._host_matches = np.zeros(capacity, dtype=np.uint8)
+        self._body_buffer = self.cl.Buffer(
+            self.context, flags.READ_ONLY, size=self._host_bodies.nbytes
+        )
+        self._length_buffer = self.cl.Buffer(
+            self.context, flags.READ_ONLY, size=self._host_lengths.nbytes
+        )
+        self._match_buffer = self.cl.Buffer(
+            self.context, flags.WRITE_ONLY, size=self._host_matches.nbytes
+        )
+        self._capacity = capacity
+        self._width = width
+
+    def _pattern_buffer(self, pattern_bytes: bytes):
+        buffer = self._pattern_buffer_cache.get(pattern_bytes)
+        if buffer is None:
+            host = self.np.frombuffer(pattern_bytes or b"\x00", dtype=self.np.uint8).copy()
+            buffer = self.cl.Buffer(
+                self.context,
+                self.cl.mem_flags.READ_ONLY | self.cl.mem_flags.COPY_HOST_PTR,
+                hostbuf=host,
+            )
+            self._pattern_buffer_cache[pattern_bytes] = buffer
+        return buffer
+
     def match_addresses(
         self,
         addresses: list[str],
@@ -197,42 +250,39 @@ class GPUAddressMatcher:
         if not addresses:
             return []
 
+        np = self.np
         bodies = [address_body(address, crypto).encode("ascii") for address in addresses]
+        count = len(bodies)
         width = max(1, max(len(body) for body in bodies))
-        body_matrix = self.np.zeros((len(bodies), width), dtype=self.np.uint8)
-        lengths = self.np.zeros(len(bodies), dtype=self.np.int32)
+        self._ensure_buffers(count, width)
 
+        host_bodies = self._host_bodies
+        host_lengths = self._host_lengths
         for index, body in enumerate(bodies):
-            body_matrix[index, : len(body)] = self.np.frombuffer(body, dtype=self.np.uint8)
-            lengths[index] = len(body)
+            host_bodies[index, : len(body)] = np.frombuffer(body, dtype=np.uint8)
+            host_lengths[index] = len(body)
 
         pattern_bytes = normalize_pattern(pattern, crypto).encode("ascii")
         end_pattern_bytes = normalize_pattern(end_pattern, crypto).encode("ascii")
-        pattern_array = self.np.frombuffer(pattern_bytes or b"\x00", dtype=self.np.uint8).copy()
-        end_pattern_array = self.np.frombuffer(end_pattern_bytes or b"\x00", dtype=self.np.uint8).copy()
-        matches = self.np.zeros(len(bodies), dtype=self.np.uint8)
+        matches = self._host_matches[:count]
 
-        flags = self.cl.mem_flags
-        body_buffer = self.cl.Buffer(self.context, flags.READ_ONLY | flags.COPY_HOST_PTR, hostbuf=body_matrix)
-        length_buffer = self.cl.Buffer(self.context, flags.READ_ONLY | flags.COPY_HOST_PTR, hostbuf=lengths)
-        pattern_buffer = self.cl.Buffer(self.context, flags.READ_ONLY | flags.COPY_HOST_PTR, hostbuf=pattern_array)
-        end_pattern_buffer = self.cl.Buffer(self.context, flags.READ_ONLY | flags.COPY_HOST_PTR, hostbuf=end_pattern_array)
-        match_buffer = self.cl.Buffer(self.context, flags.WRITE_ONLY, matches.nbytes)
+        self.cl.enqueue_copy(self.queue, self._body_buffer, host_bodies[:count])
+        self.cl.enqueue_copy(self.queue, self._length_buffer, host_lengths[:count])
 
         self.kernel(
             self.queue,
-            (len(bodies),),
+            (count,),
             None,
-            body_buffer,
-            length_buffer,
-            self.np.int32(width),
-            pattern_buffer,
-            self.np.int32(len(pattern_bytes)),
-            end_pattern_buffer,
-            self.np.int32(len(end_pattern_bytes)),
-            self.np.int32(POSITION_CODES[position]),
-            match_buffer,
+            self._body_buffer,
+            self._length_buffer,
+            np.int32(width),
+            self._pattern_buffer(pattern_bytes),
+            np.int32(len(pattern_bytes)),
+            self._pattern_buffer(end_pattern_bytes),
+            np.int32(len(end_pattern_bytes)),
+            np.int32(POSITION_CODES[position]),
+            self._match_buffer,
         )
-        self.cl.enqueue_copy(self.queue, matches, match_buffer)
+        self.cl.enqueue_copy(self.queue, matches, self._match_buffer)
         self.queue.finish()
         return [index for index, matched in enumerate(matches) if matched]

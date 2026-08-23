@@ -17,7 +17,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from gpu_backend import GPUAddressMatcher, list_gpu_devices
-from vanity_core import estimate_difficulty, matches_pattern, validate_pattern
+from vanity_core import estimate_difficulty, matches_pattern, searchable_address_length, validate_pattern
 from vanity_generators import BitcoinGenerator, EthereumGenerator, TorGenerator
 
 
@@ -25,7 +25,6 @@ MAX_WORKERS = 64
 STATS_BATCH_SIZE = 256
 GPU_BATCH_SIZE = 4096
 BENCHMARK_SECONDS = 2.0
-GPU_BENCHMARK_BATCH_SIZE = 1024
 BASE_SPEED_BY_TARGET = {
     "bitcoin": 12000,
     "ethereum": 12000,
@@ -386,6 +385,15 @@ class VanityAddressGUI:
             if not end_valid:
                 messagebox.showerror("Invalid End Pattern", end_error)
                 return None
+            combined_limit = searchable_address_length(crypto)
+            if len(pattern) + len(end_pattern) > combined_limit:
+                messagebox.showerror(
+                    "Patterns Too Long",
+                    f"The start and end patterns together need {len(pattern) + len(end_pattern)} characters, "
+                    f"but this target has at most {combined_limit} searchable characters. "
+                    "No address can satisfy both patterns.",
+                )
+                return None
 
         try:
             target_count = int(self.count_var.get())
@@ -487,9 +495,9 @@ class VanityAddressGUI:
 
         def generate_address(generator: BitcoinGenerator | EthereumGenerator | TorGenerator) -> str:
             if config.crypto == "bitcoin":
-                address, _private_key = generator.generate_address(config.compressed)  # type: ignore[attr-defined]
+                address, _material = generator.generate_candidate(config.compressed)  # type: ignore[attr-defined]
             else:
-                address, _private_key = generator.generate_address()  # type: ignore[call-arg]
+                address, _material = generator.generate_candidate()  # type: ignore[call-arg]
             return address
 
         def benchmark_cpu(worker_index: int) -> None:
@@ -516,7 +524,7 @@ class VanityAddressGUI:
             try:
                 while not self.calibration_stop_event.is_set():
                     batch_addresses.append(generate_address(generator))
-                    if len(batch_addresses) >= GPU_BENCHMARK_BATCH_SIZE:
+                    if len(batch_addresses) >= GPU_BATCH_SIZE:
                         with gpu_lock:
                             gpu_matcher.match_addresses(
                                 batch_addresses,
@@ -580,8 +588,10 @@ class VanityAddressGUI:
 
         measured_speed = max(1.0, speed)
         difficulty = estimate_difficulty(config.pattern, config.position, config.crypto, config.end_pattern)
+        # Expected attempts = target_count x difficulty (mean of the geometric
+        # distribution); earlier versions halved it and understated times ~2x.
         expected = self.format_time_estimate_from_seconds(
-            ((difficulty / 2) * max(1, config.target_count)) / measured_speed
+            (difficulty * max(1, config.target_count)) / measured_speed
         )
         self.speed_var.set(f"{int(measured_speed):,} addr/sec")
         self.time_est_var.set(expected)
@@ -589,7 +599,6 @@ class VanityAddressGUI:
             f"[BENCH] Measured {int(measured_speed):,} addr/sec on this hardware. Estimated time: {expected}.\n"
         )
 
-        difficulty = estimate_difficulty(config.pattern, config.position, config.crypto, config.end_pattern)
         if difficulty > 1_000_000:
             answer = messagebox.askyesno(
                 "Difficult Pattern Warning",
@@ -612,17 +621,23 @@ class VanityAddressGUI:
         messagebox.showerror("Calibration Failed", error)
 
     def launch_generation(self, config: GenerationConfig) -> None:
+        # Make sure workers from a previous run have fully stopped and flushed
+        # their attempt counters before resetting shared state, otherwise a
+        # late flush could corrupt the fresh totals.
+        for thread in self.generator_threads:
+            thread.join(timeout=2.0)
+        self.generator_threads.clear()
+
         self.current_config = config
         self.is_generating = True
         self.completion_notice_shown = False
         self.stop_event.clear()
-        self.generator_threads.clear()
 
         with self._lock:
             self.total_attempts = 0
             self.found_count = 0
 
-        self.start_time = time.time()
+        self.start_time = time.perf_counter()
         self.last_update_time = self.start_time
         self.last_attempts = 0
         self.start_button.config(state=tk.DISABLED)
@@ -669,9 +684,9 @@ class VanityAddressGUI:
         try:
             while not self.stop_event.is_set():
                 if config.crypto == "bitcoin":
-                    address, private_key = generator.generate_address(config.compressed)  # type: ignore[attr-defined]
+                    address, material = generator.generate_candidate(config.compressed)  # type: ignore[attr-defined]
                 else:
-                    address, private_key = generator.generate_address()  # type: ignore[call-arg]
+                    address, material = generator.generate_candidate()  # type: ignore[call-arg]
 
                 thread_attempts += 1
                 pending_attempts += 1
@@ -698,9 +713,10 @@ class VanityAddressGUI:
                         if self.found_count >= config.target_count:
                             self.stop_event.set()
 
+                    final_address, private_key = generator.finalize_match(address, material)  # type: ignore[arg-type]
                     self.result_queue.put(
                         {
-                            "address": address,
+                            "address": final_address,
                             "private_key": private_key,
                             "match_number": match_number,
                             "thread_id": thread_id,
@@ -725,39 +741,39 @@ class VanityAddressGUI:
         generator = generator_type()
         thread_attempts = 0
         batch_addresses: list[str] = []
-        batch_private_keys: list[str] = []
+        batch_materials: list[object] = []
         batch_thread_attempts: list[int] = []
 
         try:
             while not self.stop_event.is_set():
                 if config.crypto == "bitcoin":
-                    address, private_key = generator.generate_address(config.compressed)  # type: ignore[attr-defined]
+                    address, material = generator.generate_candidate(config.compressed)  # type: ignore[attr-defined]
                 else:
-                    address, private_key = generator.generate_address()  # type: ignore[call-arg]
+                    address, material = generator.generate_candidate()  # type: ignore[call-arg]
 
                 thread_attempts += 1
                 batch_addresses.append(address)
-                batch_private_keys.append(private_key)
+                batch_materials.append(material)
                 batch_thread_attempts.append(thread_attempts)
 
                 if len(batch_addresses) >= GPU_BATCH_SIZE:
-                    self.process_gpu_batch(config, thread_id, batch_addresses, batch_private_keys, batch_thread_attempts)
+                    self.process_gpu_batch(config, thread_id, batch_addresses, batch_materials, batch_thread_attempts)
                     batch_addresses = []
-                    batch_private_keys = []
+                    batch_materials = []
                     batch_thread_attempts = []
         except Exception as exc:
             self.stop_event.set()
             self.result_queue.put({"error": f"Worker {thread_id} failed: {exc}"})
         finally:
             if batch_addresses:
-                self.process_gpu_batch(config, thread_id, batch_addresses, batch_private_keys, batch_thread_attempts)
+                self.process_gpu_batch(config, thread_id, batch_addresses, batch_materials, batch_thread_attempts)
 
     def process_gpu_batch(
         self,
         config: GenerationConfig,
         thread_id: int,
         addresses: list[str],
-        private_keys: list[str],
+        materials: list[object],
         thread_attempts: list[int],
     ) -> None:
         if not addresses:
@@ -787,10 +803,11 @@ class VanityAddressGUI:
                 if self.found_count >= config.target_count:
                     self.stop_event.set()
 
+            final_address, private_key = GENERATOR_TYPES[config.crypto].finalize_match(addresses[index], materials[index])  # type: ignore[arg-type]
             self.result_queue.put(
                 {
-                    "address": addresses[index],
-                    "private_key": private_keys[index],
+                    "address": final_address,
+                    "private_key": private_key,
                     "match_number": match_number,
                     "thread_id": thread_id,
                     "thread_attempts": thread_attempts[index],
@@ -822,7 +839,9 @@ class VanityAddressGUI:
             pass
 
         if self.is_generating and self.generator_threads and all(not thread.is_alive() for thread in self.generator_threads):
-            if self.current_config and self.found_count >= self.current_config.target_count:
+            with self._lock:
+                found_count = self.found_count
+            if self.current_config and found_count >= self.current_config.target_count:
                 self.finish_generation("COMPLETE", show_dialog=True)
             elif self.stop_event.is_set():
                 self.finish_generation("STOPPED", show_dialog=False)
@@ -918,7 +937,7 @@ class VanityAddressGUI:
             attempts = self.total_attempts
             found = self.found_count
 
-        elapsed = time.time() - self.start_time if self.start_time else 0
+        elapsed = time.perf_counter() - self.start_time if self.start_time else 0
         self.append_result(
             f"\n[END] {state} | found={found} | attempts={attempts:,} | elapsed={self.format_time_estimate_from_seconds(elapsed)}\n"
         )
@@ -946,7 +965,7 @@ class VanityAddressGUI:
         self.found_var.set("0 addresses")
 
     def update_stats(self) -> None:
-        current_time = time.time()
+        current_time = time.perf_counter()
         with self._lock:
             total_attempts = self.total_attempts
             found_count = self.found_count
@@ -967,7 +986,7 @@ class VanityAddressGUI:
                         self.current_config.crypto,
                         self.current_config.end_pattern,
                     )
-                    expected_total = (difficulty / 2) * max(1, self.current_config.target_count)
+                    expected_total = difficulty * max(1, self.current_config.target_count)
                     remaining = max(0, expected_total - total_attempts)
                     self.time_est_var.set(self.format_time_estimate_from_seconds(remaining / speed))
 
@@ -1019,7 +1038,7 @@ class VanityAddressGUI:
         total_speed = self.cached_measured_speed(crypto, threads, compute_mode, gpu_device_key)
         if total_speed is None:
             total_speed = self.estimated_total_speed(crypto, threads, compute_mode, gpu_device_key)
-        average_seconds = ((difficulty / 2) * max(1, target_count)) / total_speed
+        average_seconds = (difficulty * max(1, target_count)) / total_speed
         return self.format_time_estimate_from_seconds(average_seconds)
 
     def current_thread_count_for_estimate(self) -> int:
@@ -1032,13 +1051,13 @@ class VanityAddressGUI:
         return self.gpu_device_labels.get(self.gpu_device_var.get(), "")
 
     @staticmethod
-    def speed_cache_key(config: GenerationConfig) -> tuple[str, str, str, str, str, int, bool, str]:
+    def speed_cache_key(config: GenerationConfig) -> tuple[str, str, int, bool, str]:
+        # Speed does not measurably depend on the pattern itself, so pattern
+        # fields are excluded to let the calibration cache be reused across
+        # different patterns instead of forcing a new benchmark every time.
         gpu_key = config.gpu_device_key if config.compute_mode == "gpu" else ""
         return (
             config.crypto,
-            config.pattern,
-            config.end_pattern,
-            config.position,
             config.compute_mode,
             config.thread_count,
             config.compressed,
@@ -1052,17 +1071,11 @@ class VanityAddressGUI:
         compute_mode: str,
         gpu_device_key: str,
     ) -> float | None:
-        position = self.position_var.get()
-        pattern = self.pattern_var.get().strip()
-        end_pattern = self.end_pattern_var.get().strip() if position == "both" else ""
         compressed = self.compressed_var.get() if crypto == "bitcoin" else False
         gpu_key = gpu_device_key if compute_mode == "gpu" else ""
         return self.measured_speed_cache.get(
             (
                 crypto,
-                pattern,
-                end_pattern,
-                position,
                 compute_mode,
                 thread_count,
                 compressed,

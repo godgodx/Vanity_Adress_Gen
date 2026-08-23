@@ -109,3 +109,53 @@ class TorGeneratorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LazyCandidateFinalizationTests(unittest.TestCase):
+    def test_bitcoin_candidate_finalize_matches_generate_address(self):
+        generator = BitcoinGenerator()
+        for compressed in (False, True):
+            address, material = generator.generate_candidate(compressed)
+            final_address, wif = generator.finalize_match(address, material)
+            expected_address, expected_wif = generator.generate_address(compressed)
+
+            self.assertEqual(final_address, address)
+            self.assertRegex(wif, r"^5" if not compressed else r"^[KL]")
+            # Recompute the address from the finalized WIF like the tests above.
+            self.assertEqual(
+                bitcoin_address_from_wif(wif, compressed=compressed),
+                final_address,
+            )
+            del expected_address, expected_wif
+
+    def test_ethereum_candidate_finalize_matches_generate_address(self):
+        generator = EthereumGenerator()
+        address, material = generator.generate_candidate()
+        final_address, private_key_hex = generator.finalize_match(address, material)
+        expected_address, expected_key = generator.generate_address()
+
+        self.assertTrue(address.startswith("0x"))
+        self.assertEqual(address, address.lower())
+        self.assertEqual(len(material), 32)
+        self.assertEqual(private_key_hex, "0x" + material.hex())
+        self.assertEqual(EthereumGenerator.checksum_address(address[2:]), final_address)
+        self.assertIsInstance(expected_address, str)
+        self.assertIsInstance(expected_key, str)
+
+    def test_tor_candidate_finalize_matches_generate_address(self):
+        generator = TorGenerator()
+        address, material = generator.generate_candidate()
+        final_address, private_key_pem = generator.finalize_match(address, material)
+        expected_address, _expected_pem = generator.generate_address()
+
+        self.assertEqual(final_address, address)
+        self.assertRegex(address, r"^[a-z2-7]{56}\.onion$")
+        self.assertEqual(len(material), 32)
+        private_key = load_pem_private_key(private_key_pem.encode("ascii"), password=None)
+        public_key_bytes = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        self.assertEqual(address, TorGenerator.onion_v3_address(public_key_bytes))
+        self.assertIsInstance(expected_address, str)
+
+
+if __name__ == "__main__":
+    unittest.main()

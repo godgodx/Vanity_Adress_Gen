@@ -42,8 +42,20 @@ def _double_sha256(data: bytes) -> bytes:
     return hashlib.sha256(hashlib.sha256(data).digest()).digest()
 
 
+try:
+    hashlib.new("ripemd160", b"").digest()
+
+    def _ripemd160(data: bytes) -> bytes:
+        return hashlib.new("ripemd160", data).digest()
+except Exception:  # pragma: no cover - OpenSSL 3.x without the legacy provider.
+    from Crypto.Hash import RIPEMD160 as _CryptoRIPEMD160
+
+    def _ripemd160(data: bytes) -> bytes:
+        return _CryptoRIPEMD160.new(data).digest()
+
+
 def _hash160(data: bytes) -> bytes:
-    return hashlib.new("ripemd160", hashlib.sha256(data).digest()).digest()
+    return _ripemd160(hashlib.sha256(data).digest())
 
 
 def _base58check_encode(payload: bytes) -> str:
@@ -73,23 +85,34 @@ class BitcoinGenerator:
 
     Uncompressed keys return WIF values starting with "5". Compressed keys
     return WIF values starting with "K" or "L".
+
+    For hot search loops, use ``generate_candidate`` (which skips WIF
+    encoding) and only call ``finalize_match`` for confirmed matches. The
+    ``generate_address`` convenience method returns identical results by
+    combining both steps.
     """
 
-    def generate_address(self, compressed: bool = False) -> Tuple[str, str]:
+    def generate_candidate(self, compressed: bool = False) -> Tuple[str, Tuple[bytes, bool]]:
+        """Return an address plus raw private key material for later finalization."""
         private_value = _random_secp256k1_private_value()
         private_key_bytes = private_value.to_bytes(32, "big")
         public_key_bytes = _secp256k1_public_key(private_value, private_key_bytes, compressed)
 
         address_payload = BITCOIN_MAINNET_P2PKH_VERSION + _hash160(public_key_bytes)
-        address = _base58check_encode(address_payload)
-        private_key_wif = self._create_wif(private_key_bytes, compressed)
-        return address, private_key_wif
+        return _base58check_encode(address_payload), (private_key_bytes, compressed)
 
-    def _create_wif(self, private_key_bytes: bytes, compressed: bool = False) -> str:
+    @staticmethod
+    def finalize_match(address: str, material: Tuple[bytes, bool]) -> Tuple[str, str]:
+        """Return the displayable address and the WIF private key for a match."""
+        private_key_bytes, compressed = material
         payload = BITCOIN_MAINNET_WIF_VERSION + private_key_bytes
         if compressed:
             payload += b"\x01"
-        return _base58check_encode(payload)
+        return address, _base58check_encode(payload)
+
+    def generate_address(self, compressed: bool = False) -> Tuple[str, str]:
+        address, material = self.generate_candidate(compressed)
+        return self.finalize_match(address, material)
 
 
 class EthereumGenerator:
@@ -110,13 +133,30 @@ class EthereumGenerator:
         )
         return "0x" + checksummed
 
-    def generate_address(self) -> Tuple[str, str]:
+    def generate_candidate(self) -> Tuple[str, bytes]:
+        """Return a lowercase address candidate plus raw private key bytes.
+
+        The EIP-55 checksum casing is intentionally deferred to
+        ``finalize_match`` because pattern matching is case-insensitive and
+        computing it for every attempt would waste one Keccak-256 hash per
+        candidate.
+        """
         private_value = _random_secp256k1_private_value()
         private_key_bytes = private_value.to_bytes(32, "big")
         public_key_bytes = _secp256k1_public_key(private_value, private_key_bytes, compressed=False)[1:]
         address_hex = keccak256(public_key_bytes)[-20:].hex()
-        private_key_hex = "0x" + private_key_bytes.hex()
-        return self.checksum_address(address_hex), private_key_hex
+        return "0x" + address_hex, private_key_bytes
+
+    @staticmethod
+    def finalize_match(address: str, material: bytes) -> Tuple[str, str]:
+        """Return the EIP-55 checksummed address and hex private key for a match."""
+        if not address.lower().startswith("0x") or len(address) != 42:
+            raise ValueError("Ethereum finalize_match expects a 40-character lowercase hex address.")
+        return EthereumGenerator.checksum_address(address[2:]), "0x" + material.hex()
+
+    def generate_address(self) -> Tuple[str, str]:
+        address, material = self.generate_candidate()
+        return self.finalize_match(address, material)
 
 
 class TorGenerator:
@@ -125,21 +165,39 @@ class TorGenerator:
 
     The returned private key is a PKCS#8 PEM Ed25519 key. It can be loaded by
     standard cryptography tooling to recreate the public key and onion address.
+
+    For hot search loops, use ``generate_candidate`` (which skips PEM
+    serialization) and only call ``finalize_match`` for confirmed matches.
     """
 
-    def generate_address(self) -> Tuple[str, str]:
+    def generate_candidate(self) -> Tuple[str, bytes]:
+        """Return an onion address plus the raw 32-byte Ed25519 private seed."""
         private_key = ed25519.Ed25519PrivateKey.generate()
+        private_key_bytes = private_key.private_bytes(
+            Encoding.Raw,
+            PrivateFormat.Raw,
+            NoEncryption(),
+        )
         public_key_bytes = private_key.public_key().public_bytes(
             Encoding.Raw,
             PublicFormat.Raw,
         )
-        address = self.onion_v3_address(public_key_bytes)
+        return self.onion_v3_address(public_key_bytes), private_key_bytes
+
+    @staticmethod
+    def finalize_match(address: str, material: bytes) -> Tuple[str, str]:
+        """Return the onion address and PKCS#8 PEM private key for a match."""
+        private_key = ed25519.Ed25519PrivateKey.from_private_bytes(material)
         private_key_pem = private_key.private_bytes(
             Encoding.PEM,
             PrivateFormat.PKCS8,
             NoEncryption(),
         ).decode("ascii").strip()
         return address, private_key_pem
+
+    def generate_address(self) -> Tuple[str, str]:
+        address, material = self.generate_candidate()
+        return self.finalize_match(address, material)
 
     @staticmethod
     def onion_v3_address(public_key_bytes: bytes) -> str:

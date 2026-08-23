@@ -11,3 +11,9 @@ env/
 
 output/*
 !output/.gitkeep
+
+# Local verification harness (not part of the shipped project)
+_verify_independent.py
+
+# Windows artifact
+nul
